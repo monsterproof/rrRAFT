@@ -10,7 +10,7 @@ Diese Pipeline analysiert die Thorax-Bewegung in Videobildern und extrahiert dar
 
 ```bash
 # Repository klonen / Dateien kopieren
-cd respiration_monitor
+
 
 # Virtuelle Umgebung erstellen (empfohlen)
 python -m venv venv
@@ -18,21 +18,11 @@ source venv/bin/activate  # Linux/Mac
 # oder: venv\Scripts\activate  # Windows
 
 # Abhängigkeiten installieren
-pip install -r requirements.txt
+pip install ultralytics
 
-# Für RAFT (GPU empfohlen):
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
 ```
 
 ## Verwendung
-
-### Einfache Version (ohne GPU)
-
-```bash
-python simple_monitor.py
-```
-
-### Vollständige Version mit RAFT
 
 ```bash
 python respiration_pipeline.py
@@ -63,6 +53,7 @@ python respiration_pipeline.py --no-raft
 ## Tastenbelegung
 
 - `q` - Beenden
+- `s` - Display / Hide Skeleton
 - `r` - ROI zurücksetzen (nur simple_monitor.py)
 
 ## Architektur
@@ -70,7 +61,7 @@ python respiration_pipeline.py --no-raft
 ```
 ┌─────────────┐     ┌──────────────────┐     ┌─────────────────┐
 │   Kamera    │ ──▶ │  ROI-Erkennung   │ ──▶ │  Optical Flow   │
-│  (30 FPS)   │     │  (MediaPipe)     │     │  (RAFT/Farneb.) │
+│  (30 FPS)   │     │       (YOLO)     │     │  (RAFT/Farneb.) │
 └─────────────┘     └──────────────────┘     └─────────────────┘
                                                       │
                                                       ▼
@@ -82,7 +73,7 @@ python respiration_pipeline.py --no-raft
 
 ## Signal-Verarbeitung
 
-1. **ROI-Extraktion**: Thorax-Region via MediaPipe Pose Landmarks
+1. **ROI-Extraktion**: Thorax-Region via YOLO Pose Landmarks
 2. **Motion-Extraktion**: Vertikale Komponente des Optical Flow (Median)
 3. **Filterung**: Butterworth Bandpass 0.1-0.5 Hz (6-30 BPM)
 4. **RR-Schätzung**: Peak im Welch-Periodogramm

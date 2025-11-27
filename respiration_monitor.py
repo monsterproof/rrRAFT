@@ -56,7 +56,7 @@ class Config:
     
     # Optical Flow
     use_raft: bool = True      # RAFT oder Farnebäck
-    use_raft_small: bool = True
+    use_raft_small: bool = False
     
     # Display
     show_skeleton: bool = False
