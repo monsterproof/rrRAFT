@@ -3,3 +3,4 @@ yolov8n-pose.pt
 __pychache__/
 *.pyc 
 .DS_Store
+recordings/

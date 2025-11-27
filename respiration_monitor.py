@@ -56,7 +56,7 @@ class Config:
     
     # Optical Flow
     use_raft: bool = True      # RAFT oder Farnebäck
-    use_raft_small: bool = False
+    use_raft_small: bool = True
     
     # Display
     show_skeleton: bool = False
@@ -705,6 +705,167 @@ class RespirationAnalyzer:
         self.filtered_signal = np.array([])
         self.actual_fs = self.config.target_fps
 
+class DataRecorder:
+    """Zeichnet alle Messwerte für spätere Analyse auf"""
+    
+    def __init__(self, output_dir: str = "recordings"):
+        self.output_dir = output_dir
+        self.recording = False
+        self.start_time: Optional[float] = None
+        self.session_id: Optional[str] = None
+        
+        # Rohdaten
+        self.timestamps: List[float] = []
+        self.vertical_motion_raw: List[float] = []
+        self.roi_sizes: List[Tuple[int, int]] = []  # (width, height)
+        self.confidences: List[float] = []
+        self.roi_modes: List[str] = []
+        
+        # Analysierte Daten (werden periodisch gespeichert)
+        self.analysis_timestamps: List[float] = []
+        self.respiration_rates: List[float] = []
+        self.rr_confidences: List[float] = []
+        self.actual_fs_values: List[float] = []
+        
+        # Gefilterte Signale (gespeichert bei Analyse)
+        self.filtered_signals: List[np.ndarray] = []
+        self.filtered_signal_timestamps: List[float] = []
+    
+    def start_recording(self):
+        """Startet eine neue Aufzeichnung"""
+        import os
+        from datetime import datetime
+        
+        # Verzeichnis erstellen
+        os.makedirs(self.output_dir, exist_ok=True)
+        
+        # Session ID aus Timestamp
+        self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.start_time = time.time()
+        self.recording = True
+        
+        # Buffer leeren
+        self.timestamps.clear()
+        self.vertical_motion_raw.clear()
+        self.roi_sizes.clear()
+        self.confidences.clear()
+        self.roi_modes.clear()
+        self.analysis_timestamps.clear()
+        self.respiration_rates.clear()
+        self.rr_confidences.clear()
+        self.actual_fs_values.clear()
+        self.filtered_signals.clear()
+        self.filtered_signal_timestamps.clear()
+        
+        print(f"Aufzeichnung gestartet: {self.session_id}")
+    
+    def stop_recording(self) -> str:
+        """Stoppt die Aufzeichnung und speichert alle Daten"""
+        if not self.recording:
+            return ""
+        
+        self.recording = False
+        filepath = self._save_data()
+        print(f"Aufzeichnung gespeichert: {filepath}")
+        return filepath
+    
+    def add_sample(self, timestamp: float, vertical_motion: float, 
+                   roi_size: Tuple[int, int], confidence: float, roi_mode: str):
+        """Fügt einen Rohdaten-Sample hinzu"""
+        if not self.recording:
+            return
+        
+        self.timestamps.append(timestamp)
+        self.vertical_motion_raw.append(vertical_motion)
+        self.roi_sizes.append(roi_size)
+        self.confidences.append(confidence)
+        self.roi_modes.append(roi_mode)
+    
+    def add_analysis(self, timestamp: float, rr: float, confidence: float, 
+                     actual_fs: float, filtered_signal: np.ndarray):
+        """Fügt Analyse-Ergebnisse hinzu"""
+        if not self.recording:
+            return
+        
+        self.analysis_timestamps.append(timestamp)
+        self.respiration_rates.append(rr)
+        self.rr_confidences.append(confidence)
+        self.actual_fs_values.append(actual_fs)
+        
+        # Gefiltertes Signal kopieren
+        self.filtered_signals.append(filtered_signal.copy())
+        self.filtered_signal_timestamps.append(timestamp)
+    
+    def _save_data(self) -> str:
+        """Speichert alle Daten in CSV und NPZ Dateien"""
+        import os
+        
+        base_path = os.path.join(self.output_dir, self.session_id)
+        
+        # 1. Rohdaten als CSV
+        raw_csv_path = f"{base_path}_raw.csv"
+        with open(raw_csv_path, 'w') as f:
+            f.write("timestamp,vertical_motion,roi_width,roi_height,confidence,roi_mode\n")
+            for i in range(len(self.timestamps)):
+                roi_w, roi_h = self.roi_sizes[i] if i < len(self.roi_sizes) else (0, 0)
+                f.write(f"{self.timestamps[i]:.4f},"
+                       f"{self.vertical_motion_raw[i]:.6f},"
+                       f"{roi_w},{roi_h},"
+                       f"{self.confidences[i]:.4f},"
+                       f"{self.roi_modes[i]}\n")
+        
+        # 2. Analyse-Ergebnisse als CSV
+        analysis_csv_path = f"{base_path}_analysis.csv"
+        with open(analysis_csv_path, 'w') as f:
+            f.write("timestamp,respiration_rate,confidence,actual_fs\n")
+            for i in range(len(self.analysis_timestamps)):
+                f.write(f"{self.analysis_timestamps[i]:.4f},"
+                       f"{self.respiration_rates[i]:.2f},"
+                       f"{self.rr_confidences[i]:.4f},"
+                       f"{self.actual_fs_values[i]:.2f}\n")
+        
+        # 3. Signale als NPZ (komprimiertes NumPy Format)
+        npz_path = f"{base_path}_signals.npz"
+        np.savez_compressed(
+            npz_path,
+            timestamps=np.array(self.timestamps),
+            vertical_motion_raw=np.array(self.vertical_motion_raw),
+            analysis_timestamps=np.array(self.analysis_timestamps),
+            respiration_rates=np.array(self.respiration_rates),
+            # Letztes gefiltertes Signal (vollständig)
+            filtered_signal=self.filtered_signals[-1] if self.filtered_signals else np.array([]),
+            # Metadata
+            session_id=self.session_id,
+            duration=self.timestamps[-1] if self.timestamps else 0
+        )
+        
+        # 4. Zusammenfassung
+        summary_path = f"{base_path}_summary.txt"
+        with open(summary_path, 'w') as f:
+            duration = self.timestamps[-1] if self.timestamps else 0
+            avg_rr = np.mean(self.respiration_rates) if self.respiration_rates else 0
+            std_rr = np.std(self.respiration_rates) if self.respiration_rates else 0
+            avg_fs = np.mean(self.actual_fs_values) if self.actual_fs_values else 0
+            
+            f.write(f"Session: {self.session_id}\n")
+            f.write(f"Dauer: {duration:.1f} Sekunden\n")
+            f.write(f"Samples: {len(self.timestamps)}\n")
+            f.write(f"Durchschnittliche Sample-Rate: {avg_fs:.2f} Hz\n")
+            f.write(f"Atemfrequenz: {avg_rr:.1f} ± {std_rr:.1f} /min\n")
+            f.write(f"\nDateien:\n")
+            f.write(f"  - {raw_csv_path}\n")
+            f.write(f"  - {analysis_csv_path}\n")
+            f.write(f"  - {npz_path}\n")
+        
+        return base_path
+    
+    def is_recording(self) -> bool:
+        return self.recording
+    
+    def get_duration(self) -> float:
+        if not self.recording or not self.timestamps:
+            return 0.0
+        return self.timestamps[-1]
 
 class Visualizer:
     """Visualisierung der Ergebnisse"""
@@ -834,6 +995,9 @@ class RespirationMonitor:
         self.fps_counter: int = 0
         self.fps_time: float = time.time()
         self.current_fps: int = 0
+
+        # Recorder
+        self.recorder = DataRecorder()
         
         print("Bereit!")
     
@@ -910,6 +1074,27 @@ class RespirationMonitor:
         result['respiration_rate'] = rr
         result['confidence'] = confidence
         result['signal'] = self.analyzer.get_signal_for_plot()
+
+        # Rohdaten aufzeichnen
+        if result['roi'] is not None and result['vertical_motion'] != 0:
+            x, y, w, h = result['roi']
+            self.recorder.add_sample(
+                timestamp=timestamp,
+                vertical_motion=result['vertical_motion'],
+                roi_size=(w, h),
+                confidence=detection.get('confidence', 0),
+                roi_mode=self.detector.roi_mode.value
+            )
+        
+        # Analyse-Ergebnisse aufzeichnen
+        if result['respiration_rate'] > 0:
+            self.recorder.add_analysis(
+                timestamp=timestamp,
+                rr=result['respiration_rate'],
+                confidence=result['confidence'],
+                actual_fs=self.analyzer.get_actual_fs(),
+                filtered_signal=self.analyzer.get_signal_for_plot()
+            )
         
         # Fortschritt
         progress = len(self.analyzer.signal_buffer) / self.analyzer.min_samples
@@ -976,6 +1161,18 @@ class RespirationMonitor:
             cv2.putText(frame, "Optical Flow", (fw - 165, 135),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
         
+        # Aufzeichnungsstatus
+        if self.recorder.is_recording():
+            # Roter Punkt + "REC"
+            cv2.circle(frame, (frame.shape[1] - 30, 30), 10, (0, 0, 255), -1)
+            cv2.putText(frame, "REC", (frame.shape[1] - 70, 35),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            
+            # Aufzeichnungsdauer
+            duration = self.recorder.get_duration()
+            cv2.putText(frame, f"{duration:.1f}s", (frame.shape[1] - 70, 55),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+        
         return frame
     
     def _draw_roi_mode_legend(self, frame: np.ndarray):
@@ -1031,6 +1228,7 @@ class RespirationMonitor:
         Args:
             video_source: Kamera-ID (int) oder Videodatei-Pfad (str)
         """
+        
         cap = cv2.VideoCapture(video_source)
         
         if not cap.isOpened():
@@ -1058,6 +1256,7 @@ class RespirationMonitor:
         print("  3 - ROI: Jugulum (Dekolleté)")
         print("  4 - ROI: Abdomen (Bauch)")
         print("  5 - ROI: Shoulders (Schultern)")
+        print("  SPACE - Aufzeichnung starten/stoppen") 
         print()
         
         frame_idx = 0
@@ -1092,7 +1291,14 @@ class RespirationMonitor:
             # Tastatureingabe
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
+                if self.recorder.is_recording():
+                    self.recorder.stop_recording()
                 break
+            elif key == ord(' '):  # SPACE
+                if self.recorder.is_recording():
+                    self.recorder.stop_recording()
+                else:
+                    self.recorder.start_recording()
             elif key == ord('r'):
                 self.analyzer.reset()
                 self.prev_roi_frame = None
