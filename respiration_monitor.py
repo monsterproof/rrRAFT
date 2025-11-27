@@ -864,9 +864,7 @@ class RespirationMonitor:
         }
         
         # 1. Pose Detection & ROI
-        t0 = time.perf_counter()
         detection = self.detector.detect(frame)
-        t1 = time.perf_counter()
         result['roi'] = detection['roi']
         result['keypoints'] = detection['all_keypoints']
         
@@ -878,8 +876,7 @@ class RespirationMonitor:
         x, y, w, h = detection['roi']
         roi_frame = frame[y:y+h, x:x+w]
         
-        t3 = 0 # For Debugging
-        t2 = 0 # For Debugging
+
         # 3. Optical Flow berechnen
         if self.prev_roi_frame is not None:
             # Grössen anpassen falls nötig
@@ -895,9 +892,7 @@ class RespirationMonitor:
                 curr_resized = cv2.resize(roi_frame, (target_w, target_h))
                 
                 # Flow berechnen
-                t2 = time.perf_counter()
                 flow = self.optical_flow.compute(prev_resized, curr_resized)
-                t3 = time.perf_counter()
                 result['flow'] = flow
                 
                 # Vertikale Bewegung extrahieren
@@ -920,7 +915,6 @@ class RespirationMonitor:
         progress = len(self.analyzer.signal_buffer) / self.analyzer.min_samples
         result['progress'] = min(progress, 1.0)
 
-        print(f"YOLO: {(t1-t0)*1000:.1f}ms | Flow: {(t3-t2)*1000:.1f}ms")
         
         return result
     
