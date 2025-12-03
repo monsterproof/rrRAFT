@@ -5,18 +5,17 @@ Echtzeit-Atemfrequenz-Monitoring mit YOLO Pose + Optical Flow
 Pipeline zur kontaktlosen Messung der Atemfrequenz über RGB-Kamera.
 Verwendet YOLOv8 Pose für Thorax-Detektion und RAFT/Farnebäck für Bewegungsanalyse.
 
-Autor: Jonas / Claude
 """
 
 import cv2
 import numpy as np
 import torch
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional, Tuple, List
 from enum import Enum
 import time
-from scipy.signal import butter, filtfilt, welch, find_peaks
+from scipy.signal import butter, filtfilt, welch
 from scipy.ndimage import median_filter
 from ultralytics import YOLO
 
@@ -48,10 +47,10 @@ class Config:
     roi_smoothing: int = 5     # Frames für ROI-Glättung
     
     # Signal Processing
-    buffer_seconds: int = 60   # Sekunden für RR-Berechnung
+    buffer_seconds: int = 40   # Sekunden für RR-Berechnung
     min_seconds: int = 5       # Minimum für erste Schätzung
     filter_low: float = 0.1    # Hz (6 BPM)
-    filter_high: float = 0.5   # Hz (30 BPM)
+    filter_high: float = 0.75   # Hz (45 BPM)
     filter_order: int = 4
     
     # Optical Flow
@@ -59,7 +58,7 @@ class Config:
     use_raft_small: bool = True
     
     # Display
-    show_skeleton: bool = False
+    show_skeleton: bool = True
     show_flow: bool = True
     show_signal: bool = True
     signal_plot_width: int = 400
@@ -572,12 +571,38 @@ class RespirationAnalyzer:
         self.current_confidence: float = 0.0
         self.filtered_signal: np.ndarray = np.array([])
         self.actual_fs: float = config.target_fps  # Wird dynamisch aktualisiert
+
+        # Kalibrierung
+        self.calibration_seconds: float = 5.0
+        self.calibration_complete: bool = False
+        self._calibration_start: Optional[float] = None
+
     
     def add_sample(self, value: float, timestamp: float):
-        """Fügt einen neuen Messwert hinzu"""
+        # Kalibrierungsphase überspringen
+        if not self.calibration_complete:
+            if self._calibration_start is None:  # Nur einmal setzen
+                self._calibration_start = timestamp
+            
+            if timestamp - self._calibration_start < self.calibration_seconds:
+                return
+            
+            self.calibration_complete = True
+
+
+        # Ausreisser-Detektion
+        if len(self.signal_buffer) > 10:
+            recent = list(self.signal_buffer)[-10:]
+            median = np.median(recent)
+            mad = np.median(np.abs(np.array(recent) - median))
+            threshold = 5 * (mad + 0.1)
+        
+            if abs(value - median) > threshold:
+                return
+        
         self.signal_buffer.append(value)
         self.time_buffer.append(timestamp)
-    
+        
     def _compute_actual_fs(self) -> float:
         """Berechnet die tatsächliche Sample-Rate aus den Zeitstempeln"""
         if len(self.time_buffer) < 2:
@@ -641,14 +666,14 @@ class RespirationAnalyzer:
             self.filtered_signal = signal
         
         # Welch Periodogramm mit korrekter Sample-Rate
-        nperseg = min(len(self.filtered_signal), int(self.actual_fs * 15))  # Max 15s Fenster
+        nperseg = min(len(self.filtered_signal), int(self.actual_fs * 20))  # Max 20s Fenster
         
         try:
             frequencies, psd = welch(
                 self.filtered_signal, 
                 fs=self.actual_fs,  # ← Echte Sample-Rate!
                 nperseg=nperseg,
-                noverlap=nperseg // 2
+                noverlap= nperseg //2
             )
         except Exception:
             return self.current_rr, self.current_confidence
@@ -667,8 +692,10 @@ class RespirationAnalyzer:
         peak_power = psd_range[peak_idx]
         
         # RR in BPM
-        rr_bpm = peak_freq * 60
-        
+        alpha = 0.1
+        rr_bpm_smooth = alpha * (peak_freq * 60) + (1 - alpha) * self.current_rr
+        rr_bpm = rr_bpm_smooth        
+
         # Konfidenz: Peak-Power relativ zu Gesamtpower
         total_power = np.sum(psd_range)
         if total_power > 0:
@@ -704,6 +731,8 @@ class RespirationAnalyzer:
         self.current_confidence = 0.0
         self.filtered_signal = np.array([])
         self.actual_fs = self.config.target_fps
+        self.calibration_complete = False
+
 
 class DataRecorder:
     """Zeichnet alle Messwerte für spätere Analyse auf"""
@@ -941,17 +970,20 @@ class Visualizer:
             cv2.putText(frame, f"{progress:.0%}", (310 - 40, 103),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
         else:
+            if confidence < 0.1:
+                rr = 0
+
             # RR anzeigen
             if rr > 0:
                 # Farbe basierend auf Konfidenz
-                if confidence > 0.35:
+                if confidence > 0.40:
                     color = (0, 255, 0)  # Grün
                 elif confidence > 0.2:
                     color = (0, 255, 255)  # Gelb
                 else:
                     color = (0, 165, 255)  # Orange
                 
-                cv2.putText(frame, f"{rr:.1f}", (20, 85),
+                cv2.putText(frame, f"{rr:.0f}", (20, 85),
                            cv2.FONT_HERSHEY_SIMPLEX, 1.8, color, 3)
                 cv2.putText(frame, "/min", (140, 85),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 1)
@@ -1343,11 +1375,11 @@ def main():
                        help='Videoquelle: Kamera-ID oder Dateipfad')
     parser.add_argument('--fps', type=int, default=10,
                        help='Ziel-FPS für Verarbeitung (default: 10)')
-    parser.add_argument('--buffer', type=int, default=30,
+    parser.add_argument('--buffer', type=int, default=40,
                        help='Puffergrösse in Sekunden (default: 30)')
     parser.add_argument('--yolo-model', type=str, default='yolov8n-pose.pt',
                        help='YOLO Pose Modell (default: yolov8n-pose.pt)')
-    parser.add_argument('--roi-mode', type=str, default='full',
+    parser.add_argument('--roi-mode', type=str, default='chest',
                        choices=['full', 'chest', 'jugulum', 'abdomen', 'shoulders'],
                        help='ROI-Modus: full, chest, jugulum, abdomen, shoulders')
     parser.add_argument('--no-raft', action='store_true',
