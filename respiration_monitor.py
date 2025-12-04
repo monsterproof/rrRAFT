@@ -551,111 +551,101 @@ class OpticalFlowProcessor:
 
 class RespirationAnalyzer:
     """Analysiert das Atmungssignal und berechnet die Atemfrequenz"""
-    
+
     def __init__(self, config: Config):
         self.config = config
         self.buffer_size = config.buffer_seconds * config.target_fps
         self.min_samples = config.min_seconds * config.target_fps
-        
-        # Buffers
+
         self.signal_buffer: deque = deque(maxlen=self.buffer_size)
         self.time_buffer: deque = deque(maxlen=self.buffer_size)
-        
-        # Filter-Koeffizienten werden dynamisch berechnet
+
         self.filter_order = config.filter_order
         self.filter_low = config.filter_low
         self.filter_high = config.filter_high
-        
-        # Ergebnisse
+
         self.current_rr: float = 0.0
         self.current_confidence: float = 0.0
         self.filtered_signal: np.ndarray = np.array([])
-        self.actual_fs: float = config.target_fps  # Wird dynamisch aktualisiert
+        self.actual_fs: float = config.target_fps
+
+        # neue SMOOTHING-Variablen
+        self.freq_history = deque(maxlen=20)
+        self.rr_exp = None
+        self.rr_smooth = None
 
         # Kalibrierung
-        self.calibration_seconds: float = 5.0
-        self.calibration_complete: bool = False
-        self._calibration_start: Optional[float] = None
+        self.calibration_seconds = 5.0
+        self.calibration_complete = False
+        self._calibration_start = None
 
-    
+
+    def reset(self):
+        self.signal_buffer.clear()
+        self.time_buffer.clear()
+        self.current_rr = 0.0
+        self.current_confidence = 0.0
+        self.filtered_signal = np.array([])
+        self.actual_fs = self.config.target_fps
+        self.calibration_complete = False
+        self._calibration_start = None
+
+        # SMOOTHING-Zustände resetten
+        self.freq_history.clear()
+        self.rr_exp = None
+        self.rr_smooth = None
+
+
     def add_sample(self, value: float, timestamp: float):
-        # Kalibrierungsphase überspringen
+
         if not self.calibration_complete:
-            if self._calibration_start is None:  # Nur einmal setzen
+            if self._calibration_start is None:
                 self._calibration_start = timestamp
-            
             if timestamp - self._calibration_start < self.calibration_seconds:
                 return
-            
             self.calibration_complete = True
 
-
-        # Ausreisser-Detektion
+        # Ausreißer-Schutz
         if len(self.signal_buffer) > 10:
             recent = list(self.signal_buffer)[-10:]
             median = np.median(recent)
             mad = np.median(np.abs(np.array(recent) - median))
             threshold = 5 * (mad + 0.1)
-        
             if abs(value - median) > threshold:
                 return
-        
+
         self.signal_buffer.append(value)
         self.time_buffer.append(timestamp)
-        
-    def _compute_actual_fs(self) -> float:
-        """Berechnet die tatsächliche Sample-Rate aus den Zeitstempeln"""
+
+
+    def _compute_actual_fs(self):
         if len(self.time_buffer) < 2:
             return self.config.target_fps
-        
-        times = np.array(self.time_buffer)
-        duration = times[-1] - times[0]
-        
+
+        t = np.array(self.time_buffer)
+        duration = t[-1] - t[0]
         if duration <= 0:
             return self.config.target_fps
-        
-        # Anzahl Intervalle = Anzahl Samples - 1
-        actual_fs = (len(times) - 1) / duration
-        
-        # Sanity check: nicht zu weit von target_fps abweichen
-        if actual_fs < 1.0 or actual_fs > self.config.target_fps * 2:
+
+        fs = (len(t) - 1) / duration
+        if fs < 1 or fs > self.config.target_fps * 2:
             return self.config.target_fps
-        
-        return actual_fs
-    
-    def _compute_filter_coefficients(self, fs: float) -> Tuple[np.ndarray, np.ndarray]:
-        """Berechnet Butterworth-Filterkoeffizienten für gegebene Sample-Rate"""
-        nyquist = fs / 2
-        
-        # Sicherstellen, dass Frequenzen im gültigen Bereich
-        low = self.filter_low / nyquist
-        high = self.filter_high / nyquist
-        
-        low = max(0.01, min(low, 0.99))
-        high = max(low + 0.01, min(high, 0.99))
-        
-        return butter(self.filter_order, [low, high], btype='band')
-    
-    def analyze(self) -> Tuple[float, float]:
-        """
-        Analysiert das Signal und berechnet RR.
-        
-        Returns:
-            (respiration_rate_bpm, confidence)
-        """
+        return fs
+
+
+    def analyze(self):
+
         if len(self.signal_buffer) < self.min_samples:
             return 0.0, 0.0
-        
+
         signal = np.array(self.signal_buffer)
-        
-        # Echte Sample-Rate berechnen
         self.actual_fs = self._compute_actual_fs()
-        
+
         # Preprocessing
-        signal = signal - np.mean(signal)  # DC entfernen
-        signal = median_filter(signal, size=3)  # Ausreisser glätten
-        
-        # Bandpass Filter mit korrekter Sample-Rate
+        signal = signal - np.mean(signal)
+        signal = median_filter(signal, size=3)
+
+        # Filter
         if len(signal) > 3 * self.filter_order:
             try:
                 b, a = self._compute_filter_coefficients(self.actual_fs)
@@ -664,56 +654,73 @@ class RespirationAnalyzer:
                 self.filtered_signal = signal
         else:
             self.filtered_signal = signal
-        
-        # Welch Periodogramm mit korrekter Sample-Rate
-        nperseg = min(len(self.filtered_signal), int(self.actual_fs * 20))  # Max 20s Fenster
-        
+
+        # Welch
+        nperseg = min(len(self.filtered_signal), int(self.actual_fs * 20))
         try:
-            frequencies, psd = welch(
-                self.filtered_signal, 
-                fs=self.actual_fs,  # ← Echte Sample-Rate!
+            freq, psd = welch(
+                self.filtered_signal,
+                fs=self.actual_fs,
                 nperseg=nperseg,
-                noverlap= nperseg //2
+                noverlap=nperseg // 2
             )
         except Exception:
             return self.current_rr, self.current_confidence
-        
-        # Relevanten Frequenzbereich maskieren
-        mask = (frequencies >= self.filter_low) & (frequencies <= self.filter_high)
-        freq_range = frequencies[mask]
+
+        mask = (freq >= self.filter_low) & (freq <= self.filter_high)
+        freq_range = freq[mask]
         psd_range = psd[mask]
-        
         if len(psd_range) == 0:
             return self.current_rr, self.current_confidence
-        
-        # Peak finden
+
+        # Peak
         peak_idx = np.argmax(psd_range)
         peak_freq = freq_range[peak_idx]
         peak_power = psd_range[peak_idx]
-        
-        # RR in BPM
-        alpha = 0.1
-        rr_bpm_smooth = alpha * (peak_freq * 60) + (1 - alpha) * self.current_rr
-        rr_bpm = rr_bpm_smooth        
 
-        # Konfidenz: Peak-Power relativ zu Gesamtpower
+        # -------------------------
+        # KONFIDENZ – VOR SMOOTHING!
+        # -------------------------
         total_power = np.sum(psd_range)
         if total_power > 0:
             confidence = peak_power / total_power
         else:
             confidence = 0.0
-        
-        # Zusätzliche Konfidenz-Checks
+
         noise_floor = np.median(psd_range)
         if noise_floor > 0:
             snr = peak_power / noise_floor
             if snr < 2:
                 confidence *= 0.5
-        
-        self.current_rr = rr_bpm
-        self.current_confidence = min(confidence, 1.0)
-        
+
+        # -------------------------
+        # 3-STUFIGE GLÄTTUNG
+        # -------------------------
+        peak_bpm = peak_freq * 60
+
+        # (1) Median über letzte Peaks
+        self.freq_history.append(peak_bpm)
+        if len(self.freq_history) >= 5:
+            peak_bpm = float(np.median(list(self.freq_history)[-5:]))
+
+        # (2) Exponentielle Glättung
+        if self.rr_exp is None:
+            self.rr_exp = peak_bpm
+        self.rr_exp = 0.2 * peak_bpm + 0.8 * self.rr_exp
+
+        # (3) Low-Pass je nach confidence
+        if self.rr_smooth is None:
+            self.rr_smooth = self.rr_exp
+
+        beta = 0.15 if confidence > 0.25 else 0.05
+        self.rr_smooth = self.rr_smooth + beta * (self.rr_exp - self.rr_smooth)
+
+        # Ergebnis
+        self.current_rr = float(self.rr_smooth)
+        self.current_confidence = float(min(confidence, 1.0))
+
         return self.current_rr, self.current_confidence
+
     
     def get_signal_for_plot(self) -> np.ndarray:
         """Gibt das gefilterte Signal für Visualisierung zurück"""
@@ -1006,133 +1013,131 @@ class Visualizer:
 
 
 class RespirationMonitor:
-    """Hauptklasse für das Echtzeit-Atemfrequenz-Monitoring"""
-    
+
+    RAFT_MIN_W = 128
+    RAFT_MIN_H = 128
+
     def __init__(self, config: Optional[Config] = None):
         self.config = config or Config()
-        
-        # Komponenten initialisieren
-        print("Initialisiere Komponenten...")
         self.detector = YOLOThoraxDetector(self.config)
         self.optical_flow = OpticalFlowProcessor(self.config)
         self.analyzer = RespirationAnalyzer(self.config)
         self.visualizer = Visualizer()
-        
-        # State
-        self.prev_roi_frame: Optional[np.ndarray] = None
-        self.start_time: Optional[float] = None
-        self.frame_count: int = 0
-        
-        # FPS Tracking
-        self.fps_counter: int = 0
-        self.fps_time: float = time.time()
-        self.current_fps: int = 0
-
-        # Recorder
         self.recorder = DataRecorder()
-        
-        print("Bereit!")
-    
-    def process_frame(self, frame: np.ndarray) -> dict:
-        """
-        Verarbeitet ein einzelnes Frame.
-        
-        Returns:
-            Dictionary mit allen Ergebnissen
-        """
+
+        self.prev_roi_frame = None
+        self.start_time = None
+        self.frame_count = 0
+
+        self.fps_counter = 0
+        self.fps_time = time.time()
+        self.current_fps = 0
+
+
+    def process_frame(self, frame):
+
         if self.start_time is None:
             self.start_time = time.time()
-        
+
         timestamp = time.time() - self.start_time
-        self.frame_count += 1
-        
+
         result = {
-            'frame': frame,
-            'timestamp': timestamp,
-            'roi': None,
-            'keypoints': None,
-            'flow': None,
-            'vertical_motion': 0.0,
-            'respiration_rate': 0.0,
-            'confidence': 0.0,
-            'signal': np.array([]),
-            'progress': 0.0
+            "frame": frame,
+            "timestamp": timestamp,
+            "roi": None,
+            "keypoints": None,
+            "flow": None,
+            "vertical_motion": 0.0,
+            "respiration_rate": 0.0,
+            "confidence": 0.0,
+            "signal": np.array([]),
+            "progress": 0.0
         }
-        
-        # 1. Pose Detection & ROI
+
+        # Detection
         detection = self.detector.detect(frame)
-        result['roi'] = detection['roi']
-        result['keypoints'] = detection['all_keypoints']
-        
-        if detection['roi'] is None:
+        roi = detection["roi"]
+        result["roi"] = roi
+        result["keypoints"] = detection["all_keypoints"]
+
+        if roi is None:
             self.prev_roi_frame = None
             return result
-        
-        # 2. ROI extrahieren
-        x, y, w, h = detection['roi']
-        roi_frame = frame[y:y+h, x:x+w]
-        
 
-        # 3. Optical Flow berechnen
+        x, y, w, h = roi
+        roi_frame = frame[y:y+h, x:x+w]
+
+        # ------------------------------------------------
+        # RAFT MINDESTGRÖSSE SCHUTZ
+        # ------------------------------------------------
+        if w < self.RAFT_MIN_W or h < self.RAFT_MIN_H:
+            self.prev_roi_frame = None
+            result["vertical_motion"] = 0.0
+            return result
+
+        # Optical Flow
         if self.prev_roi_frame is not None:
-            # Grössen anpassen falls nötig
+
             prev_h, prev_w = self.prev_roi_frame.shape[:2]
             curr_h, curr_w = roi_frame.shape[:2]
-            
-            if abs(prev_w - curr_w) < 50 and abs(prev_h - curr_h) < 50:
-                # Auf gemeinsame Grösse bringen
-                target_w = min(prev_w, curr_w)
-                target_h = min(prev_h, curr_h)
-                
-                prev_resized = cv2.resize(self.prev_roi_frame, (target_w, target_h))
-                curr_resized = cv2.resize(roi_frame, (target_w, target_h))
-                
-                # Flow berechnen
-                flow = self.optical_flow.compute(prev_resized, curr_resized)
-                result['flow'] = flow
-                
-                # Vertikale Bewegung extrahieren
-                vertical_motion = self.optical_flow.extract_vertical_motion(flow)
-                result['vertical_motion'] = vertical_motion
-                
-                # Zum Analyzer hinzufügen
-                self.analyzer.add_sample(vertical_motion, timestamp)
-        
-        # 4. ROI für nächstes Frame speichern
-        self.prev_roi_frame = roi_frame.copy()
-        
-        # 5. Atemfrequenz analysieren
-        rr, confidence = self.analyzer.analyze()
-        result['respiration_rate'] = rr
-        result['confidence'] = confidence
-        result['signal'] = self.analyzer.get_signal_for_plot()
 
-        # Rohdaten aufzeichnen
-        if result['roi'] is not None and result['vertical_motion'] != 0:
-            x, y, w, h = result['roi']
-            self.recorder.add_sample(
-                timestamp=timestamp,
-                vertical_motion=result['vertical_motion'],
-                roi_size=(w, h),
-                confidence=detection.get('confidence', 0),
-                roi_mode=self.detector.roi_mode.value
-            )
-        
-        # Analyse-Ergebnisse aufzeichnen
-        if result['respiration_rate'] > 0:
+            # Mindestgrößen sicherstellen
+            if (prev_w >= self.RAFT_MIN_W and prev_h >= self.RAFT_MIN_H and
+                curr_w >= self.RAFT_MIN_W and curr_h >= self.RAFT_MIN_H):
+
+                # auf gemeinsame Größe normalisieren
+                tw = min(prev_w, curr_w)
+                th = min(prev_h, curr_h)
+
+                prev_res = cv2.resize(self.prev_roi_frame, (tw, th))
+                curr_res = cv2.resize(roi_frame, (tw, th))
+
+                try:
+                    flow = self.optical_flow.compute(prev_res, curr_res)
+                    result["flow"] = flow
+
+                    vertical_motion = self.optical_flow.extract_vertical_motion(flow)
+                    result["vertical_motion"] = vertical_motion
+
+                    self.analyzer.add_sample(vertical_motion, timestamp)
+
+                except Exception:
+                    # Fallback: keine Bewegung
+                    result["vertical_motion"] = 0.0
+
+        # Save for next iteration
+        self.prev_roi_frame = roi_frame.copy()
+
+        # Analyse
+        rr, conf = self.analyzer.analyze()
+        result["respiration_rate"] = rr
+        result["confidence"] = conf
+        result["signal"] = self.analyzer.get_signal_for_plot()
+
+        # Recording
+        if result["roi"] is not None:
+            if result["vertical_motion"] != 0:
+                self.recorder.add_sample(
+                    timestamp=timestamp,
+                    vertical_motion=result["vertical_motion"],
+                    roi_size=(w, h),
+                    confidence=detection.get("confidence", 0),
+                    roi_mode=self.detector.roi_mode.value
+                )
+
+        if rr > 0:
             self.recorder.add_analysis(
                 timestamp=timestamp,
-                rr=result['respiration_rate'],
-                confidence=result['confidence'],
+                rr=rr,
+                confidence=conf,
                 actual_fs=self.analyzer.get_actual_fs(),
                 filtered_signal=self.analyzer.get_signal_for_plot()
             )
-        
+
         # Fortschritt
         progress = len(self.analyzer.signal_buffer) / self.analyzer.min_samples
-        result['progress'] = min(progress, 1.0)
+        result["progress"] = min(progress, 1.0)
 
-        
         return result
     
     def render(self, result: dict) -> np.ndarray:
