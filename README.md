@@ -1,137 +1,238 @@
-# Atemfrequenz-Monitoring mit RGB-Kamera
+# Respiration Monitor
 
-Kontaktlose Echtzeit-Messung der Atemfrequenz mittels Optical Flow.
+Real-time contactless respiratory rate monitoring using RGB camera, YOLOv8 Pose detection, and optical flow analysis.
 
-## Überblick
+## Overview
 
-Diese Pipeline analysiert die Thorax-Bewegung in Videobildern und extrahiert daraus die Atemfrequenz. Basierend auf dem Review-Paper "Remote Respiration Measurement with RGB Cameras" (ACM Computing Surveys, 2025).
+This system measures breathing rate by detecting subtle chest movements through a standard webcam. It combines deep learning-based pose estimation with optical flow algorithms to extract respiratory signals from video frames.
 
 ## Installation
 
-```bash
-# Repository klonen / Dateien kopieren
+### Requirements
 
+- Python 3.9+
+- Webcam or video file
 
-# Virtuelle Umgebung erstellen (empfohlen)
-python -m venv venv
-source venv/bin/activate  # Linux/Mac
-# oder: venv\Scripts\activate  # Windows
-
-# Abhängigkeiten installieren
-pip install ultralytics
-
-```
-
-## Verwendung
+### Dependencies
 
 ```bash
-python respiration_pipeline.py
+pip install numpy opencv-python torch torchvision ultralytics scipy
 ```
 
-### Optionen
+For Apple Silicon (M1/M2/M3/M4), PyTorch with MPS acceleration is used automatically.
 
-| Parameter | Beschreibung | Default |
-|-----------|--------------|---------|
-| `--source` | Kamera-ID oder Videodatei | 0 |
-| `--fps` | Ziel-Framerate für Verarbeitung | 10 |
-| `--buffer` | Puffergrösse in Sekunden | 30 |
-| `--no-raft` | Farnebäck statt RAFT verwenden | False |
+### Download YOLO Model
 
-### Beispiele
+The YOLOv8 pose model downloads automatically on first run, or manually:
 
 ```bash
-# Webcam mit 10 FPS
-python simple_monitor.py --source 0 --fps 10
+# Nano model (fastest, ~6MB)
+yolo export model=yolov8n-pose.pt
 
-# Videodatei analysieren
-python respiration_pipeline.py --source video.mp4
-
-# Ohne RAFT (schneller, weniger genau)
-python respiration_pipeline.py --no-raft
+# Small model (better accuracy, ~23MB)
+yolo export model=yolov8s-pose.pt
 ```
 
-## Tastenbelegung
+## Usage
 
-- `q` - Beenden
-- `s` - Display / Hide Skeleton
-- `r` - ROI zurücksetzen (nur simple_monitor.py)
+### Basic Usage
 
-## Architektur
-
-```
-┌─────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│   Kamera    │ ──▶ │  ROI-Erkennung   │ ──▶ │  Optical Flow   │
-│  (30 FPS)   │     │       (YOLO)     │     │  (RAFT/Farneb.) │
-└─────────────┘     └──────────────────┘     └─────────────────┘
-                                                      │
-                                                      ▼
-┌─────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│  Anzeige    │ ◀── │  RR-Berechnung   │ ◀── │ Signal-Filter   │
-│  (RR, Plot) │     │  (Welch PSD)     │     │  (Butterworth)  │
-└─────────────┘     └──────────────────┘     └─────────────────┘
+```bash
+cd respiration_monitor
+python main.py
 ```
 
-## Signal-Verarbeitung
+### Command Line Options
 
-1. **ROI-Extraktion**: Thorax-Region via YOLO Pose Landmarks
-2. **Motion-Extraktion**: Vertikale Komponente des Optical Flow (Median)
-3. **Filterung**: Butterworth Bandpass 0.1-0.5 Hz (6-30 BPM)
-4. **RR-Schätzung**: Peak im Welch-Periodogramm
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--source` | `0` | Video source: camera ID or file path |
+| `--fps` | `10` | Target processing FPS |
+| `--buffer` | `40` | Signal buffer size in seconds |
+| `--yolo-model` | `yolov8n-pose.pt` | YOLO pose model |
+| `--roi-mode` | `full` | ROI mode: `full`, `chest`, `jugulum`, `abdomen`, `shoulders` |
+| `--no-raft` | - | Use Farnebäck instead of RAFT optical flow |
+| `--no-skeleton` | - | Hide skeleton overlay |
+| `--no-flow` | - | Hide optical flow visualization |
 
-## Konfiguration
+### Examples
 
-Die wichtigsten Parameter in `Config`:
+```bash
+# Use external webcam
+python main.py --source 1
 
-```python
-@dataclass
-class Config:
-    target_fps: int = 10        # Verarbeitungs-Framerate
-    buffer_seconds: int = 30    # Sekunden für RR-Berechnung
-    filter_low: float = 0.1     # Hz (6 BPM)
-    filter_high: float = 0.5    # Hz (30 BPM)
-    use_raft_small: bool = True # Schnellere RAFT-Variante
+# Analyze video file
+python main.py --source breathing_video.mp4
+
+# Focus on upper chest region
+python main.py --roi-mode chest
+
+# Use classical optical flow (faster on CPU)
+python main.py --no-raft
+
+# Longer buffer for more stable readings
+python main.py --buffer 60
 ```
 
-## Genauigkeit
+### Keyboard Controls
 
-Basierend auf dem Benchmark aus dem Paper:
+| Key | Action |
+|-----|--------|
+| `q` | Quit application |
+| `r` | Reset signal buffer |
+| `s` | Toggle skeleton display |
+| `f` | Toggle optical flow visualization |
+| `1` | ROI: Full Thorax (shoulders to hips) |
+| `2` | ROI: Upper Chest (shoulders to mid-torso) |
+| `3` | ROI: Jugulum (décolletage area) |
+| `4` | ROI: Abdomen (belly region) |
+| `5` | ROI: Shoulders (shoulder line only) |
+| `Space` | Start/stop recording |
 
-| Methode | MAE (BPM) | PCC | Zeit/Frame |
-|---------|-----------|-----|------------|
-| RAFT | ~1.4 | ~0.66 | ~10ms |
-| Farnebäck | ~2.0 | ~0.51 | ~1ms |
+### ROI Modes
 
-## Einschränkungen
+Different body regions can be tracked depending on clothing, camera angle, and breathing pattern:
 
-- Patient sollte relativ still sitzen/liegen
-- Thorax muss im Bild sichtbar sein
-- Mindestens 5 Sekunden für erste Messung
-- Starke Bewegungen verfälschen das Signal
+- **Full Thorax**: Best for general use, tracks entire upper body
+- **Upper Chest**: Good for seated positions, focuses on ribcage expansion
+- **Jugulum**: Sensitive area near the throat, works well with low-cut clothing
+- **Abdomen**: Tracks diaphragmatic breathing, useful for relaxation monitoring
+- **Shoulders**: Tracks shoulder rise/fall, works through most clothing
 
-## Troubleshooting
+## Technical Implementation
 
-### "RAFT nicht verfügbar"
-- PyTorch/Torchvision installieren
-- GPU-Treiber prüfen
-- Fallback auf `--no-raft`
+### Processing Pipeline
 
-### Keine Pose erkannt
-- Beleuchtung verbessern
-- Abstand zur Kamera anpassen
-- Oberkörper vollständig im Bild
+```
+┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+│   Camera    │ -> │  YOLO Pose  │ -> │  ROI Crop   │ -> │ Optical Flow│
+│   Frame     │    │  Detection  │    │  Extraction │    │  (RAFT)     │
+└─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘
+                                                                │
+                                                                v
+┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+│  Display    │ <- │  Smoothing  │ <- │   Welch     │ <- │  Bandpass   │
+│  Result     │    │  (3-stage)  │    │   PSD       │    │  Filter     │
+└─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘
+```
 
-### Ungenaue Messungen
-- Buffer-Zeit erhöhen (`--buffer 60`)
-- Bewegungen minimieren
-- Kleidung mit Kontrast/Textur hilft
+### 1. Pose Detection (YOLOv8)
 
-## Referenzen
+YOLOv8-Pose detects 17 COCO keypoints per person. The relevant keypoints for respiratory monitoring are:
+
+- Keypoints 5, 6: Left/Right Shoulder
+- Keypoints 11, 12: Left/Right Hip
+- Keypoint 0: Nose (for jugulum mode reference)
+
+The ROI is computed from these keypoints with configurable padding and smoothed over multiple frames using median filtering to reduce jitter.
+
+### 2. Optical Flow (RAFT / Farnebäck)
+
+Optical flow measures pixel displacement between consecutive frames within the ROI.
+
+**RAFT (Recurrent All-Pairs Field Transforms)**:
+- Deep learning-based optical flow
+- More accurate, especially for small movements
+- Requires GPU/MPS for real-time performance
+- Minimum ROI size: 128x128 pixels
+
+**Farnebäck**:
+- Classical polynomial expansion method
+- Faster on CPU
+- Less accurate for subtle movements
+- No minimum size requirement
+
+The vertical component (y-axis motion) is extracted as the respiratory signal, using the median value across all pixels in the ROI to reduce noise.
+
+### 3. Signal Processing
+
+#### Preprocessing
+- DC removal (subtract mean)
+- Median filter (kernel size 3) to remove impulse noise
+- Outlier rejection: samples exceeding 5× MAD (median absolute deviation) are discarded
+
+#### Bandpass Filter
+- Butterworth filter, 4th order
+- Passband: 0.1 Hz to 0.75 Hz (6 to 45 breaths/min)
+- Applied with `filtfilt` for zero phase distortion
+
+#### Spectral Analysis (Welch's Method)
+- Window length: min(buffer_length, 20 seconds × sample_rate)
+- 50% overlap between segments
+- Hanning window
+- Peak detection within passband
+
+#### Confidence Estimation
+- Primary: Peak power / total power in passband
+- Secondary: Signal-to-noise ratio (peak / median power)
+- Confidence reduced by 50% if SNR < 2
+
+### 4. Output Smoothing (3-Stage)
+
+To provide stable readings despite noisy input:
+
+1. **Median Filter**: Rolling median over last 5 peak frequencies
+2. **Exponential Smoothing**: `RR_exp = 0.2 × RR_new + 0.8 × RR_exp`
+3. **Adaptive Low-Pass**: 
+   - High confidence (>25%): `β = 0.15`
+   - Low confidence: `β = 0.05`
+   - `RR_smooth = RR_smooth + β × (RR_exp - RR_smooth)`
+
+### 5. Calibration
+
+A 5-second calibration period at startup allows the signal to stabilize before measurements begin. During this time, no samples are added to the buffer.
+
+## Data Recording
+
+Press `Space` to start/stop recording. Data is saved to the `recordings/` directory:
+
+| File | Content |
+|------|---------|
+| `*_raw.csv` | Timestamp, vertical motion, ROI size, confidence, ROI mode |
+| `*_analysis.csv` | Timestamp, respiratory rate, confidence, actual sample rate |
+| `*_signals.npz` | NumPy archive with raw and filtered signals |
+| `*_summary.txt` | Session summary with statistics |
+
+## Module Structure
+
+```
+respiration_monitor/
+├── main.py              # Main application, CLI, keyboard handling
+├── config.py            # Configuration dataclass
+├── roi_detection.py     # YOLOv8 pose detection, ROI extraction
+├── optical_flow.py      # RAFT and Farnebäck optical flow
+├── signal_analysis.py   # Bandpass filter, Welch PSD, smoothing
+├── visualization.py     # OpenCV drawing utilities
+├── data_recorder.py     # CSV/NPZ data export
+└── __init__.py          # Package exports
+```
+
+## Performance Tips
+
+- **Reduce target FPS** (`--fps 5`) for slower machines
+- **Use Farnebäck** (`--no-raft`) on CPU-only systems
+- **Choose smaller ROI** (`--roi-mode jugulum`) for faster processing
+- **Use nano model** (`--yolo-model yolov8n-pose.pt`) for speed
+- **Ensure good lighting** for better pose detection
+- **Minimize subject movement** for cleaner signal
+- **Wear fitted clothing** or use jugulum mode for best results
+
+## Limitations
+
+- Single person tracking only (uses first detected person)
+- Requires relatively stable camera position
+- Performance depends on lighting conditions
+- Large movements (walking, gesturing) corrupt the signal
+- Loose clothing reduces accuracy
+
+
+## References
 
 - Boccignone et al. (2025): "Remote Respiration Measurement with RGB Cameras: A Review and Benchmark"
 - Teed & Deng (2020): "RAFT: Recurrent All-Pairs Field Transforms for Optical Flow"
 - resPyre: https://github.com/phuselab/resPyre
 
-## Lizenz
 
-MIT License - Für Forschung und nicht-kommerzielle Anwendungen.
-Für klinische Anwendungen entsprechende Zertifizierungen beachten.
+## License
+
+MIT License
